@@ -1,4 +1,4 @@
-name: Build Chiaki for iPadOS
+name: Build Chiaki for iPadOS 26.1
 
 on:
   workflow_dispatch:
@@ -11,62 +11,121 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode installations
-        run: |
-          echo "Installed Xcode versions:"
-          ls -d /Applications/Xcode*.app 2>/dev/null || true
-
-      - name: Select Xcode 26.x
+      - name: Select Xcode 26.1.1
         shell: bash
         run: |
           set -e
 
-          XCODE=""
-
-          for APP in \
-            /Applications/Xcode_26.1.1.app \
-            /Applications/Xcode_26.1.app \
-            /Applications/Xcode_26.0.1.app \
-            /Applications/Xcode_26.0.app
-          do
-            if [ -d "$APP" ]; then
-              XCODE="$APP"
-              break
-            fi
-          done
-
-          if [ -z "$XCODE" ]; then
-            echo "Xcode 26.x was not found."
-            echo "Available versions:"
-            ls -d /Applications/Xcode*.app 2>/dev/null || true
+          if [ -d "/Applications/Xcode_26.1.1.app" ]; then
+            sudo xcode-select -s "/Applications/Xcode_26.1.1.app"
+          else
+            echo "Xcode 26.1.1 not found"
+            ls -d /Applications/Xcode*.app || true
             exit 1
           fi
 
-          echo "Using: $XCODE"
-
-          sudo xcode-select -s "$XCODE"
-
-          echo "Xcode:"
           xcodebuild -version
-
-          echo "SDKs:"
           xcodebuild -showsdks
 
-      - name: Check project
+      - name: Install Qt
+        shell: bash
+        run: |
+          set -e
+
+          brew update
+
+          echo "Installing Qt..."
+          brew install qt@5
+
+          QT_PREFIX="$(brew --prefix qt@5)"
+
+          echo "Qt prefix:"
+          echo "$QT_PREFIX"
+
+          echo "Qt binaries:"
+          find "$QT_PREFIX" -maxdepth 4 -type f \
+            \( -name qmake -o -name qmake6 \) \
+            -print || true
+
+          echo "QT_PREFIX=$QT_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Check Qt
+        shell: bash
+        run: |
+          set -e
+
+          echo "QT_PREFIX=$QT_PREFIX"
+
+          if [ -f "$QT_PREFIX/bin/qmake" ]; then
+            "$QT_PREFIX/bin/qmake" -v
+          else
+            echo "Qt 5 qmake was not found."
+            find "$QT_PREFIX" -type f -name qmake -print || true
+            exit 1
+          fi
+
+      - name: Inspect project
         run: |
           xcodebuild \
             -list \
             -project "Chiaki iOS.xcodeproj"
 
-      - name: Clean
+      - name: Patch hard-coded Qt path
+        shell: bash
         run: |
-          rm -rf build
-          mkdir -p build
+          set -e
+
+          echo "Searching for old Qt paths..."
+
+          grep -R \
+            -n \
+            "/Users/teun/Qt" \
+            "Chiaki iOS.xcodeproj" \
+            chiaki.pro \
+            . \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            || true
+
+          echo ""
+          echo "Project build settings containing Qt paths:"
+          grep -R \
+            -n \
+            "Qt/5.15.2" \
+            "Chiaki iOS.xcodeproj" \
+            || true
+
+      - name: Prepare Qt iOS
+        shell: bash
+        run: |
+          set -e
+
+          QT_PREFIX="$QT_PREFIX"
+
+          echo "Qt installation:"
+          find "$QT_PREFIX" -maxdepth 3 -type d | head -100
+
+          echo ""
+          echo "qmake:"
+          find "$QT_PREFIX" -type f -name qmake -print || true
 
       - name: Build Chiaki
         shell: bash
         run: |
           set -o pipefail
+
+          rm -rf build
+          mkdir -p build
+
+          echo "Using Xcode:"
+          xcodebuild -version
+
+          echo ""
+          echo "Using SDK:"
+          xcrun --sdk iphoneos --show-sdk-version
+
+          echo ""
+          echo "Building scheme: chiaki"
 
           xcodebuild \
             -project "Chiaki iOS.xcodeproj" \
@@ -82,40 +141,58 @@ jobs:
             build \
             2>&1 | tee "$GITHUB_WORKSPACE/build/xcodebuild.log"
 
-      - name: Find application
-        id: find_app
+      - name: Find Chiaki.app
+        id: app
         shell: bash
         run: |
           set -e
 
+          echo "Searching for Chiaki.app..."
+
           APP_PATH=$(find \
-            "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" \
+            "$GITHUB_WORKSPACE" \
             -type d \
-            -name "*.app" \
+            -name "Chiaki.app" \
+            -not -path "*/.git/*" \
             | head -n 1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: No .app was produced."
+            echo "Chiaki.app was not produced."
             exit 1
           fi
 
-          echo "Found app:"
+          echo "Found:"
           echo "$APP_PATH"
 
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
 
-      - name: Check supported devices
+      - name: Inspect application
+        shell: bash
         run: |
-          echo "Checking application:"
+          set +e
+
+          echo "Bundle identifier:"
           /usr/libexec/PlistBuddy \
             -c "Print :CFBundleIdentifier" \
-            "$APP_PATH/Info.plist" || true
+            "$APP_PATH/Info.plist"
 
+          echo ""
+          echo "Device family:"
           /usr/libexec/PlistBuddy \
             -c "Print :UIDeviceFamily" \
-            "$APP_PATH/Info.plist" || true
+            "$APP_PATH/Info.plist"
 
-      - name: Create IPA
+          echo ""
+          echo "Minimum iOS version:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :MinimumOSVersion" \
+            "$APP_PATH/Info.plist"
+
+          echo ""
+          echo "Architectures:"
+          file "$APP_PATH/Chiaki" || true
+
+      - name: Create unsigned IPA
         shell: bash
         run: |
           set -e
@@ -131,6 +208,8 @@ jobs:
             Chiaki-iPadOS-26.1-unsigned.ipa \
             Payload
 
+          echo ""
+          echo "IPA:"
           ls -lh Chiaki-iPadOS-26.1-unsigned.ipa
 
       - name: Upload IPA
@@ -141,7 +220,7 @@ jobs:
           path: build/Chiaki-iPadOS-26.1-unsigned.ipa
           retention-days: 7
 
-      - name: Upload build log
+      - name: Upload Xcode log
         if: always()
         uses: actions/upload-artifact@v4
         with:
