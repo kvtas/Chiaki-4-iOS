@@ -2,59 +2,40 @@ name: Build Chiaki iOS
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Show Xcode version
+      - name: Xcode version
         run: xcodebuild -version
 
-      - name: List schemes
+      - name: Inspect project
         run: |
-          xcodebuild -list \
-            -project "Chiaki iOS.xcodeproj"
+          xcodebuild -list -project "Chiaki iOS.xcodeproj"
 
-      - name: Build unsigned IPA
+      - name: Build
         run: |
-          rm -rf build
-          mkdir -p build/Payload
+          set -o pipefail
 
           xcodebuild \
             -project "Chiaki iOS.xcodeproj" \
             -scheme "Chiaki iOS" \
             -configuration Debug \
             -sdk iphoneos \
-            -derivedDataPath build/DerivedData \
+            -derivedDataPath "$GITHUB_WORKSPACE/build" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build
+            build 2>&1 | tee xcodebuild.log
 
-          APP_PATH=$(find build/DerivedData/Build/Products -name "*.app" -type d | head -n 1)
-
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: Chiaki.app was not produced."
-            exit 1
-          fi
-
-          echo "Found app: $APP_PATH"
-
-          cp -R "$APP_PATH" build/Payload/Chiaki.app
-
-          cd build
-          zip -r Chiaki-unsigned.ipa Payload
-
-      - name: Upload IPA
-        uses: actions/upload-artifact@v6
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: Chiaki-iOS-unsigned
-          path: build/Chiaki-unsigned.ipa
-          retention-days: 7
+          name: xcodebuild-log
+          path: xcodebuild.log
