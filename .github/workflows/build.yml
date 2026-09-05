@@ -1,4 +1,4 @@
-name: Build Chiaki iOS
+name: Build Chiaki for iPadOS
 
 on:
   workflow_dispatch:
@@ -11,31 +11,140 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Xcode version
-        run: xcodebuild -version
-
-      - name: Inspect project
+      - name: Show Xcode installations
         run: |
-          xcodebuild -list -project "Chiaki iOS.xcodeproj"
+          echo "Installed Xcode versions:"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
 
-      - name: Build
+      - name: Select Xcode 26.x
+        shell: bash
+        run: |
+          set -e
+
+          XCODE=""
+
+          for APP in \
+            /Applications/Xcode_26.1.1.app \
+            /Applications/Xcode_26.1.app \
+            /Applications/Xcode_26.0.1.app \
+            /Applications/Xcode_26.0.app
+          do
+            if [ -d "$APP" ]; then
+              XCODE="$APP"
+              break
+            fi
+          done
+
+          if [ -z "$XCODE" ]; then
+            echo "Xcode 26.x was not found."
+            echo "Available versions:"
+            ls -d /Applications/Xcode*.app 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Using: $XCODE"
+
+          sudo xcode-select -s "$XCODE"
+
+          echo "Xcode:"
+          xcodebuild -version
+
+          echo "SDKs:"
+          xcodebuild -showsdks
+
+      - name: Check project
+        run: |
+          xcodebuild \
+            -list \
+            -project "Chiaki iOS.xcodeproj"
+
+      - name: Clean
+        run: |
+          rm -rf build
+          mkdir -p build
+
+      - name: Build Chiaki
+        shell: bash
         run: |
           set -o pipefail
 
           xcodebuild \
             -project "Chiaki iOS.xcodeproj" \
-            -scheme "Chiaki iOS" \
-            -configuration Debug \
+            -scheme "chiaki" \
+            -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath "$GITHUB_WORKSPACE/build" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/DerivedData" \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+            TARGETED_DEVICE_FAMILY="1,2" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee xcodebuild.log
+            build \
+            2>&1 | tee "$GITHUB_WORKSPACE/build/xcodebuild.log"
+
+      - name: Find application
+        id: find_app
+        shell: bash
+        run: |
+          set -e
+
+          APP_PATH=$(find \
+            "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" \
+            -type d \
+            -name "*.app" \
+            | head -n 1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: No .app was produced."
+            exit 1
+          fi
+
+          echo "Found app:"
+          echo "$APP_PATH"
+
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+
+      - name: Check supported devices
+        run: |
+          echo "Checking application:"
+          /usr/libexec/PlistBuddy \
+            -c "Print :CFBundleIdentifier" \
+            "$APP_PATH/Info.plist" || true
+
+          /usr/libexec/PlistBuddy \
+            -c "Print :UIDeviceFamily" \
+            "$APP_PATH/Info.plist" || true
+
+      - name: Create IPA
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf build/Payload
+          mkdir -p build/Payload
+
+          cp -R "$APP_PATH" build/Payload/Chiaki.app
+
+          cd build
+
+          zip -r \
+            Chiaki-iPadOS-26.1-unsigned.ipa \
+            Payload
+
+          ls -lh Chiaki-iPadOS-26.1-unsigned.ipa
+
+      - name: Upload IPA
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Chiaki-iPadOS-26.1-unsigned
+          path: build/Chiaki-iPadOS-26.1-unsigned.ipa
+          retention-days: 7
 
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: xcodebuild.log
+          name: Chiaki-Xcode-build-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
